@@ -1,0 +1,6 @@
+{
+  "name": "Gustav Olsson Rally Kart Wii",
+  "description": "A Mario Kart Wii-inspired 3D arcade rally racer where every kart is literally Gustav Olsson mapped to his face, featuring procedural OST, drifting mini-turbos, split-screen, and real-time online multiplayer.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
