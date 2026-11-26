@@ -29,6 +29,12 @@ export default defineConfig(() => {
           if (fs.existsSync(indexHtml)) {
             fs.copyFileSync(indexHtml, notFoundHtml);
           }
+          // Mirror dist/ into docs/ so GitHub Pages branch deployment (/docs) also works out of the box
+          const docsDir = path.resolve(__dirname, 'docs');
+          if (fs.existsSync(distDir)) {
+            fs.rmSync(docsDir, {recursive: true, force: true});
+            fs.cpSync(distDir, docsDir, {recursive: true, force: true});
+          }
         },
       },
     ],
