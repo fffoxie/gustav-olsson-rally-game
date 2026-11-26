@@ -1,5 +1,6 @@
 import { Check, Copy, Globe, Play, RefreshCw, Users, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
+import type { ConnectionStatus, OnlineTransport } from '../game/onlineTransport';
 import { soundEngine } from '../game/soundEngine';
 import {
   GUSTAV_LIVERIES,
@@ -14,10 +15,10 @@ import {
 
 interface OnlineLobbyProps {
   playerSetup: PlayerSetup;
-  ws: WebSocket | null;
+  transport: OnlineTransport | null;
   roomState: OnlineRoomState | null;
   localPlayerId: string | null;
-  connectionStatus: 'connecting' | 'connected' | 'disconnected';
+  connectionStatus: ConnectionStatus;
   errorMsg: string | null;
   onCreateRoom: (trackId: TrackId, cc: EngineCC) => void;
   onJoinRoom: (code: string) => void;
@@ -30,7 +31,7 @@ interface OnlineLobbyProps {
 
 export function OnlineLobby({
   playerSetup,
-  ws,
+  transport,
   roomState,
   localPlayerId,
   connectionStatus,
@@ -49,30 +50,24 @@ export function OnlineLobby({
   const [selectedCc, setSelectedCc] = useState<EngineCC>('100cc');
   const [copied, setCopied] = useState(false);
 
+  const isP2P = transport?.kind === 'p2p';
+
   const refreshRooms = () => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'list_rooms' }));
-    }
+    transport?.send({ type: 'list_rooms' });
   };
 
   useEffect(() => {
-    if (!ws) return;
-    const handler = (ev: MessageEvent) => {
-      try {
-        const msg = JSON.parse(ev.data as string) as Record<string, unknown>;
-        if (msg.type === 'rooms_list') {
-          setRooms((msg.rooms as OnlineRoomSummary[]) || []);
-        }
-      } catch {
-        // ignore
+    if (!transport) return;
+    const unsubscribe = transport.subscribe((msg) => {
+      if (msg.type === 'rooms_list') {
+        setRooms((msg.rooms as OnlineRoomSummary[]) || []);
       }
-    };
-    ws.addEventListener('message', handler);
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'list_rooms' }));
+    });
+    if (connectionStatus === 'connected') {
+      transport.send({ type: 'list_rooms' });
     }
-    return () => ws.removeEventListener('message', handler);
-  }, [ws, connectionStatus]);
+    return unsubscribe;
+  }, [transport, connectionStatus]);
 
   const isHost = roomState?.hostId === localPlayerId;
   const localPlayer = roomState?.players.find((p) => p.id === localPlayerId);
@@ -95,7 +90,9 @@ export function OnlineLobby({
                 Online Gustav Lobby
               </h2>
               <p className="text-xs text-slate-400">
-                Real-time WebSocket multiplayer · Up to 6 Gustav Olsson karts
+                {isP2P
+                  ? 'WebRTC Peer-to-Peer multiplayer (GitHub Pages compatible) · Up to 6 Gustavs'
+                  : 'Real-time WebSocket multiplayer · Up to 6 Gustav Olsson karts'}
               </p>
             </div>
           </div>
@@ -218,7 +215,9 @@ export function OnlineLobby({
 
                 {rooms.length === 0 ? (
                   <div className="flex-1 border border-dashed border-slate-800 rounded-lg flex items-center justify-center text-xs text-slate-500 p-4 text-center">
-                    No active rooms yet. Create one and share the 4-letter code!
+                    {isP2P
+                      ? 'Direct P2P mode active: create a room or enter your friend’s 4-letter code above.'
+                      : 'No active rooms yet. Create one and share the 4-letter code!'}
                   </div>
                 ) : (
                   <div className="space-y-2 max-h-44 overflow-y-auto pr-1">

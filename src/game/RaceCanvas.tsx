@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
+import type { OnlineTransport } from './onlineTransport';
 import {
   checkItemBoxCollisions,
   computeAiInput,
@@ -31,7 +32,7 @@ import { buildRaceWorld } from './worldBuilder';
 
 interface RaceCanvasProps {
   config: RaceConfig;
-  ws: WebSocket | null;
+  transport: OnlineTransport | null;
   paused: boolean;
   onCountdownChange: (val: number | 'GO' | null) => void;
   onHudUpdate: (racers: RacerHUDState[], elapsedMs: number) => void;
@@ -54,7 +55,7 @@ const VARIANTS: KartVariant[] = ['goalie_buggy', 'turbo_coupe', 'drift_mach'];
 
 export function RaceCanvas({
   config,
-  ws,
+  transport,
   paused,
   onCountdownChange,
   onHudUpdate,
@@ -359,7 +360,7 @@ export function RaceCanvas({
       } else if (item === 'floorball_puck' || item === 'mud_trap') {
         spawnItemEntity(kart.id, item, kart.x, kart.y, kart.z, kart.heading, kart.sampleHint);
         if (kart.isHuman) soundEngine.playPuckLaunch();
-        if (config.mode === 'online' && ws && ws.readyState === WebSocket.OPEN) {
+        if (config.mode === 'online' && transport) {
           const ev: RemoteItemEvent = {
             senderId: kart.id,
             itemType: item,
@@ -368,7 +369,7 @@ export function RaceCanvas({
             z: kart.z,
             heading: kart.heading,
           };
-          ws.send(JSON.stringify({ type: 'item_event', event: ev }));
+          transport.send({ type: 'item_event', event: ev as unknown as Record<string, unknown> });
         }
       }
     };
@@ -376,41 +377,32 @@ export function RaceCanvas({
     // Remote state interpolation targets for Online mode
     const remoteTargets = new Map<string, RemoteKartPacket>();
 
-    const onWsMessage = (ev: MessageEvent) => {
-      try {
-        const msg = JSON.parse(ev.data as string) as Record<string, unknown>;
-        if (msg.type === 'kart_state') {
-          const pkt = msg.packet as RemoteKartPacket;
-          remoteTargets.set(pkt.playerId, pkt);
-        } else if (msg.type === 'item_event') {
-          const itemEv = msg.event as RemoteItemEvent;
-          if (itemEv.itemType === 'floorball_puck' || itemEv.itemType === 'mud_trap') {
-            spawnItemEntity(
-              itemEv.senderId,
-              itemEv.itemType,
-              itemEv.x,
-              itemEv.y,
-              itemEv.z,
-              itemEv.heading,
-              0,
-            );
-          }
-        } else if (msg.type === 'puck_hit') {
-          if (p1Kart && msg.targetId === p1Kart.id && p1Kart.hyperTimer <= 0) {
-            p1Kart.spinTimer = 1.35;
-            p1Kart.bannerText = 'PUCK HIT!';
-            p1Kart.bannerTimer = 1.4;
-            soundEngine.playSpinout();
-          }
+    const unsubscribeTransport = transport?.subscribe((msg) => {
+      if (msg.type === 'kart_state') {
+        const pkt = msg.packet as RemoteKartPacket;
+        remoteTargets.set(pkt.playerId, pkt);
+      } else if (msg.type === 'item_event') {
+        const itemEv = msg.event as RemoteItemEvent;
+        if (itemEv.itemType === 'floorball_puck' || itemEv.itemType === 'mud_trap') {
+          spawnItemEntity(
+            itemEv.senderId,
+            itemEv.itemType,
+            itemEv.x,
+            itemEv.y,
+            itemEv.z,
+            itemEv.heading,
+            0,
+          );
         }
-      } catch {
-        // ignore malformed packet
+      } else if (msg.type === 'puck_hit') {
+        if (p1Kart && msg.targetId === p1Kart.id && p1Kart.hyperTimer <= 0) {
+          p1Kart.spinTimer = 1.35;
+          p1Kart.bannerText = 'PUCK HIT!';
+          p1Kart.bannerTimer = 1.4;
+          soundEngine.playSpinout();
+        }
       }
-    };
-
-    if (ws) {
-      ws.addEventListener('message', onWsMessage);
-    }
+    });
 
     // Keyboard Input State
     const keys = new Set<string>();
@@ -702,8 +694,8 @@ export function RaceCanvas({
                 victim.bannerText = p.type === 'floorball_puck' ? 'PUCK HIT!' : 'SLIPPED!';
                 victim.bannerTimer = 1.3;
                 if (victim.isHuman) soundEngine.playSpinout();
-              } else if (victim.isRemote && config.mode === 'online' && ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'puck_hit', targetId: victim.id }));
+              } else if (victim.isRemote && config.mode === 'online' && transport) {
+                transport.send({ type: 'puck_hit', targetId: victim.id });
               }
               hit = true;
               break;
@@ -737,7 +729,7 @@ export function RaceCanvas({
         if (isSplitScreen && p2Kart) updateChaseCamera(cam2, cam2Look, p2Kart, dt);
 
         // Network Sync at ~25Hz for Online Mode
-        if (config.mode === 'online' && ws && ws.readyState === WebSocket.OPEN && p1Kart) {
+        if (config.mode === 'online' && transport && p1Kart) {
           netEmitTimer += dt;
           if (netEmitTimer >= 0.04) {
             netEmitTimer = 0;
@@ -760,7 +752,7 @@ export function RaceCanvas({
               finished: p1Kart.finished,
               finishTimeMs: p1Kart.finishTimeMs,
             };
-            ws.send(JSON.stringify({ type: 'kart_state', packet: pkt }));
+            transport.send({ type: 'kart_state', packet: pkt as unknown as Record<string, unknown> });
           }
         }
 
@@ -839,7 +831,7 @@ export function RaceCanvas({
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
       window.removeEventListener('resize', handleResize);
-      if (ws) ws.removeEventListener('message', onWsMessage);
+      unsubscribeTransport?.();
 
       karts.forEach((k) => k.rig.dispose());
       particles.forEach((pt) => (pt.mesh.material as THREE.Material).dispose());
@@ -854,7 +846,7 @@ export function RaceCanvas({
         container.removeChild(renderer.domElement);
       }
     };
-  }, [config, ws]);
+  }, [config, transport]);
 
   return <div ref={containerRef} className="w-full h-full" />;
 }

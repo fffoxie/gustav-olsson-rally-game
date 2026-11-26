@@ -3,6 +3,11 @@ import { MainMenu } from './components/MainMenu';
 import { OnlineLobby } from './components/OnlineLobby';
 import { RaceHUD } from './components/RaceHUD';
 import { RaceCanvas } from './game/RaceCanvas';
+import {
+  createAdaptiveOnlineTransport,
+  type ConnectionStatus,
+  type OnlineTransport,
+} from './game/onlineTransport';
 import { soundEngine } from './game/soundEngine';
 import type {
   EngineCC,
@@ -54,10 +59,10 @@ export default function App() {
   const [paused, setPaused] = useState(false);
   const [results, setResults] = useState<RaceResultsEntry[] | null>(null);
 
-  // Online WebSocket State
+  // Online Multiplayer State (WebSocket or GitHub Pages WebRTC P2P)
   const [showOnlineModal, setShowOnlineModal] = useState(false);
-  const [ws, setWs] = useState<WebSocket | null>(null);
-  const [wsStatus, setWsStatus] = useState<'connecting' | 'connected' | 'disconnected'>('disconnected');
+  const [transport, setTransport] = useState<OnlineTransport | null>(null);
+  const [wsStatus, setWsStatus] = useState<ConnectionStatus>('disconnected');
   const [roomState, setRoomState] = useState<OnlineRoomState | null>(null);
   const [localPlayerId, setLocalPlayerId] = useState<string | null>(null);
   const [onlineError, setOnlineError] = useState<string | null>(null);
@@ -67,87 +72,77 @@ export default function App() {
   const localPlayerIdRef = useRef<string | null>(null);
   localPlayerIdRef.current = localPlayerId;
 
-  const ensureWebSocket = useCallback(() => {
-    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
-      return;
-    }
-    setWsStatus('connecting');
-    setOnlineError(null);
-
-    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    const socket = new WebSocket(`${proto}://${window.location.host}/ws`);
-
-    socket.onopen = () => {
-      setWsStatus('connected');
-      socket.send(JSON.stringify({ type: 'list_rooms' }));
-    };
-
-    socket.onmessage = (ev) => {
-      try {
-        const msg = JSON.parse(ev.data as string) as Record<string, unknown>;
-        if (msg.type === 'joined_room') {
-          const pid = String(msg.playerId);
-          localPlayerIdRef.current = pid;
-          setLocalPlayerId(pid);
-          setRoomState(msg.room as OnlineRoomState);
-          setOnlineError(null);
-        } else if (msg.type === 'room_state') {
-          setRoomState(msg.room as OnlineRoomState);
-        } else if (msg.type === 'room_error') {
-          setOnlineError(String(msg.message || 'Multiplayer error'));
-        } else if (msg.type === 'left_room') {
-          localPlayerIdRef.current = null;
-          setRoomState(null);
-          setLocalPlayerId(null);
-        } else if (msg.type === 'race_started') {
-          const room = msg.room as OnlineRoomState;
-          setRoomState(room);
-          setShowOnlineModal(false);
-          setCountdown(null);
-          setPaused(false);
-          setResults(null);
-          setElapsedMs(0);
-          setRacersHud([]);
-          setActiveConfig({
-            mode: 'online',
-            trackId: room.trackId,
-            cc: room.cc,
-            p1: p1Ref.current,
-            onlineRoomCode: room.code,
-            localPlayerId: localPlayerIdRef.current || undefined,
-            onlinePlayers: room.players,
-          });
-          setRaceRunId((n) => n + 1);
-          setScreen('racing');
-        } else if (msg.type === 'returned_lobby') {
-          const room = msg.room as OnlineRoomState;
-          setRoomState(room);
-          setScreen('menu');
-          setShowOnlineModal(true);
-          soundEngine.playOst('menu');
-        }
-      } catch {
-        // ignore
+  const attachTransportListeners = useCallback((t: OnlineTransport) => {
+    return t.subscribe((msg) => {
+      if (msg.type === 'joined_room') {
+        const pid = String(msg.playerId);
+        localPlayerIdRef.current = pid;
+        setLocalPlayerId(pid);
+        setRoomState(msg.room as OnlineRoomState);
+        setOnlineError(null);
+      } else if (msg.type === 'room_state') {
+        setRoomState(msg.room as OnlineRoomState);
+      } else if (msg.type === 'room_error') {
+        setOnlineError(String(msg.message || 'Multiplayer error'));
+      } else if (msg.type === 'left_room') {
+        localPlayerIdRef.current = null;
+        setRoomState(null);
+        setLocalPlayerId(null);
+      } else if (msg.type === 'race_started') {
+        const room = msg.room as OnlineRoomState;
+        setRoomState(room);
+        setShowOnlineModal(false);
+        setCountdown(null);
+        setPaused(false);
+        setResults(null);
+        setElapsedMs(0);
+        setRacersHud([]);
+        setActiveConfig({
+          mode: 'online',
+          trackId: room.trackId,
+          cc: room.cc,
+          p1: p1Ref.current,
+          onlineRoomCode: room.code,
+          localPlayerId: localPlayerIdRef.current || undefined,
+          onlinePlayers: room.players,
+        });
+        setRaceRunId((n) => n + 1);
+        setScreen('racing');
+      } else if (msg.type === 'returned_lobby') {
+        const room = msg.room as OnlineRoomState;
+        setRoomState(room);
+        setScreen('menu');
+        setShowOnlineModal(true);
+        soundEngine.playOst('menu');
       }
-    };
+    });
+  }, []);
 
-    socket.onclose = () => {
-      setWsStatus('disconnected');
-      setWs(null);
+  useEffect(() => {
+    if (!transport) return;
+    const unsub = attachTransportListeners(transport);
+    return () => {
+      unsub();
     };
-
-    socket.onerror = () => {
-      setOnlineError('Connection lost to multiplayer server.');
-    };
-
-    setWs(socket);
-  }, [ws]);
+  }, [transport, attachTransportListeners]);
 
   useEffect(() => {
     return () => {
-      ws?.close();
+      transport?.close();
     };
-  }, [ws]);
+  }, [transport]);
+
+  const ensureOnlineTransport = useCallback(() => {
+    if (transport && wsStatus !== 'disconnected') {
+      return;
+    }
+    setOnlineError(null);
+    const created = createAdaptiveOnlineTransport(
+      (status) => setWsStatus(status),
+      (fallbackP2P) => setTransport(fallbackP2P),
+    );
+    setTransport(created);
+  }, [transport, wsStatus]);
 
   const startLocalRace = useCallback(() => {
     setCountdown(null);
@@ -176,8 +171,8 @@ export default function App() {
   }, []);
 
   const handleExitMenu = useCallback(() => {
-    if (activeConfig?.mode === 'online' && ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'leave_room' }));
+    if (activeConfig?.mode === 'online' && transport) {
+      transport.send({ type: 'leave_room' });
     }
     setScreen('menu');
     setPaused(false);
@@ -186,7 +181,7 @@ export default function App() {
     soundEngine.setFinalLap(false);
     soundEngine.setHyperStar(false);
     soundEngine.playOst('menu');
-  }, [activeConfig, ws]);
+  }, [activeConfig, transport]);
 
   const handleRaceFinished = useCallback(
     (raceResults: RaceResultsEntry[]) => {
@@ -215,71 +210,59 @@ export default function App() {
   // Online Lobby Handlers
   const handleOpenOnline = () => {
     setShowOnlineModal(true);
-    ensureWebSocket();
+    ensureOnlineTransport();
   };
 
   const handleCreateRoom = (tId: TrackId, roomCc: EngineCC) => {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(
-      JSON.stringify({
-        type: 'create_room',
-        name: p1.name || 'Gustav Olsson',
-        kartVariant: p1.kartVariant,
-        liveryId: p1.liveryId,
-        trackId: tId,
-        cc: roomCc,
-      }),
-    );
+    transport?.send({
+      type: 'create_room',
+      name: p1.name || 'Gustav Olsson',
+      kartVariant: p1.kartVariant,
+      liveryId: p1.liveryId,
+      trackId: tId,
+      cc: roomCc,
+    });
   };
 
   const handleJoinRoom = (code: string) => {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(
-      JSON.stringify({
-        type: 'join_room',
-        code,
-        name: p1.name || 'Gustav Racer',
-        kartVariant: p1.kartVariant,
-        liveryId: p1.liveryId,
-      }),
-    );
+    transport?.send({
+      type: 'join_room',
+      code,
+      name: p1.name || 'Gustav Racer',
+      kartVariant: p1.kartVariant,
+      liveryId: p1.liveryId,
+    });
   };
 
   const handleLeaveRoom = () => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'leave_room' }));
-    }
+    transport?.send({ type: 'leave_room' });
     setRoomState(null);
     setLocalPlayerId(null);
   };
 
   const handleToggleReady = () => {
-    if (!ws || ws.readyState !== WebSocket.OPEN || !roomState || !localPlayerId) return;
+    if (!transport || !roomState || !localPlayerId) return;
     const me = roomState.players.find((p) => p.id === localPlayerId);
-    ws.send(
-      JSON.stringify({
-        type: 'player_update',
-        ready: !me?.ready,
-        kartVariant: p1.kartVariant,
-        liveryId: p1.liveryId,
-        name: p1.name,
-      }),
-    );
+    transport.send({
+      type: 'player_update',
+      ready: !me?.ready,
+      kartVariant: p1.kartVariant,
+      liveryId: p1.liveryId,
+      name: p1.name,
+    });
   };
 
   const handleUpdateRoomSettings = (tId: TrackId, roomCc: EngineCC) => {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(JSON.stringify({ type: 'room_settings', trackId: tId, cc: roomCc }));
+    transport?.send({ type: 'room_settings', trackId: tId, cc: roomCc });
   };
 
   const handleStartOnlineRace = () => {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(JSON.stringify({ type: 'start_race' }));
+    transport?.send({ type: 'start_race' });
   };
 
   const handleReturnOnlineLobby = () => {
-    if (ws && ws.readyState === WebSocket.OPEN && roomState?.hostId === localPlayerId) {
-      ws.send(JSON.stringify({ type: 'return_lobby' }));
+    if (transport && roomState?.hostId === localPlayerId) {
+      transport.send({ type: 'return_lobby' });
     } else {
       setScreen('menu');
       setShowOnlineModal(true);
@@ -310,7 +293,7 @@ export default function App() {
           {showOnlineModal && (
             <OnlineLobby
               playerSetup={p1}
-              ws={ws}
+              transport={transport}
               roomState={roomState}
               localPlayerId={localPlayerId}
               connectionStatus={wsStatus}
@@ -331,7 +314,7 @@ export default function App() {
             <RaceCanvas
               key={raceRunId}
               config={activeConfig}
-              ws={ws}
+              transport={transport}
               paused={paused}
               onCountdownChange={setCountdown}
               onHudUpdate={(list, ms) => {

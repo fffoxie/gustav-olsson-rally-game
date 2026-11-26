@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { GUSTAV_LIVERIES, type KartLivery, type KartVariant } from './types';
 
 export const GUSTAV_IMAGE_URL =
-  '/assets/aistudio/57ce4433-a288-457f-a407-edb0da9dc7ea_profile__1__e795e439.jpg';
+  `${import.meta.env.BASE_URL}assets/aistudio/57ce4433-a288-457f-a407-edb0da9dc7ea_profile__1__e795e439.jpg`;
 
 interface GustavTexturePack {
   faceTexture: THREE.CanvasTexture;
